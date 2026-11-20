@@ -1,0 +1,47 @@
+{
+  "name": "trans-afrique-core-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Trans Afrique Core API — monolithe modulaire (Canada), Supabase PostgreSQL",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run",
+    "db:migrate": "tsx scripts/db-migrate.ts",
+    "openapi": "tsx scripts/generate-openapi.ts",
+    "qualify:local": "tsx scripts/qualify-local.ts",
+    "recette:supabase": "tsx scripts/recette-supabase.ts",
+    "migrate:mongo": "tsx scripts/migrate-from-mongo.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.119.2",
+    "decimal.js": "^10.6.0",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "jose": "^6.2.18",
+    "mongodb": "^7.9.1",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
+    "@vitest/coverage-v8": "^5.1.1",
+    "bcryptjs": "^3.0.3",
+    "embedded-postgres": "^18.7.0-beta.19",
+    "mongodb-memory-server": "^11.3.0",
+    "supertest": "^7.3.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  }
+}
