@@ -59,10 +59,12 @@ const routes = [
     body: z.object({ code: CountryCode, name_fr: z.string().trim().min(2).max(120), name_en: z.string().trim().min(2).max(120), default_timezone: IanaTimeZone.optional() }),
     handler: async ({ body, principal, correlationId }) => {
       assertCan(principal, "canada.countries.manage", GLOBAL_RESOURCE);
-      const r = await one(db, `insert into shared.countries(code, name_fr, name_en, default_timezone) values ($1,$2,$3,$4) returning *`,
-        [body.code, body.name_fr, body.name_en, body.default_timezone ?? null]);
-      await audit(db, { actorUserId: principal.userId, action: "shared.country.created", resourceType: "country", resourceId: body.code, next: r, correlationId });
-      return { status: 201, data: r };
+      return withTransaction(async (tx) => {
+        const r = await one(tx, `insert into shared.countries(code, name_fr, name_en, default_timezone) values ($1,$2,$3,$4) returning *`,
+          [body.code, body.name_fr, body.name_en, body.default_timezone ?? null]);
+        await audit(tx, { actorUserId: principal.userId, action: "shared.country.created", resourceType: "country", resourceId: body.code, next: r, correlationId });
+        return { status: 201, data: r };
+      });
     },
   }),
   route({
@@ -80,9 +82,11 @@ const routes = [
     body: z.object({ iata_code: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{2}$/), icao_code: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/).nullable().optional(), name: z.string().trim().min(2).max(160) }),
     handler: async ({ body, principal, correlationId }) => {
       assertCan(principal, "canada.airlines.manage", GLOBAL_RESOURCE);
-      const r = await one(db, `insert into canada.airlines(iata_code, icao_code, name, created_by) values ($1,$2,$3,$4) returning *`, [body.iata_code, body.icao_code ?? null, body.name, principal.userId]);
-      await audit(db, { actorUserId: principal.userId, action: "canada.airline.created", resourceType: "airline", resourceId: r.id, next: r, correlationId });
-      return { status: 201, data: r };
+      return withTransaction(async (tx) => {
+        const r = await one(tx, `insert into canada.airlines(iata_code, icao_code, name, created_by) values ($1,$2,$3,$4) returning *`, [body.iata_code, body.icao_code ?? null, body.name, principal.userId]);
+        await audit(tx, { actorUserId: principal.userId, action: "canada.airline.created", resourceType: "airline", resourceId: r.id, next: r, correlationId });
+        return { status: 201, data: r };
+      });
     },
   }),
   route({
@@ -96,10 +100,12 @@ const routes = [
       name: z.string().trim().min(2).max(200), city: z.string().trim().min(1).max(120), country_code: CountryCode, timezone: IanaTimeZone }),
     handler: async ({ body, principal, correlationId }) => {
       assertCan(principal, "canada.airports.manage", GLOBAL_RESOURCE);
-      const r = await one(db, `insert into canada.airports(iata_code, icao_code, name, city, country_code, timezone, created_by) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
-        [body.iata_code, body.icao_code ?? null, body.name, body.city, body.country_code, body.timezone, principal.userId]);
-      await audit(db, { actorUserId: principal.userId, action: "canada.airport.created", resourceType: "airport", resourceId: body.iata_code, next: r, correlationId });
-      return { status: 201, data: r };
+      return withTransaction(async (tx) => {
+        const r = await one(tx, `insert into canada.airports(iata_code, icao_code, name, city, country_code, timezone, created_by) values ($1,$2,$3,$4,$5,$6,$7) returning *`,
+          [body.iata_code, body.icao_code ?? null, body.name, body.city, body.country_code, body.timezone, principal.userId]);
+        await audit(tx, { actorUserId: principal.userId, action: "canada.airport.created", resourceType: "airport", resourceId: body.iata_code, next: r, correlationId });
+        return { status: 201, data: r };
+      });
     },
   }),
   // ---------- Agences et entrepôts ----------
@@ -168,10 +174,12 @@ const routes = [
     handler: async ({ params, body, principal, correlationId }) => {
       const a = await loadAgency(db, params.id);
       assertCan(principal, "canada.warehouses.manage", { countries: [a.country_code], agencyIds: [a.id] });
-      const w = await one(db, `insert into canada.warehouses(agency_id, country_code, code, name, address, capacity_m3, created_by, updated_by)
-                               values ($1,$2,$3,$4,$5,$6,$7,$7) returning *`, [a.id, a.country_code, body.code, body.name, body.address ?? null, body.capacity_m3 ?? null, principal.userId]);
-      await audit(db, { actorUserId: principal.userId, action: "canada.warehouse.created", resourceType: "warehouse", resourceId: w.id, countryCode: a.country_code, agencyId: a.id, next: w, correlationId });
-      return { status: 201, data: w };
+      return withTransaction(async (tx) => {
+        const w = await one(tx, `insert into canada.warehouses(agency_id, country_code, code, name, address, capacity_m3, created_by, updated_by)
+                                 values ($1,$2,$3,$4,$5,$6,$7,$7) returning *`, [a.id, a.country_code, body.code, body.name, body.address ?? null, body.capacity_m3 ?? null, principal.userId]);
+        await audit(tx, { actorUserId: principal.userId, action: "canada.warehouse.created", resourceType: "warehouse", resourceId: w.id, countryCode: a.country_code, agencyId: a.id, next: w, correlationId });
+        return { status: 201, data: w };
+      });
     },
   }),
   // ---------- Clients ----------
@@ -283,14 +291,14 @@ const routes = [
     method: "post", path: "/canada/requests/:id/status", tag: "Demandes", auth: "canada", anyPermission: ["canada.requests.process"],
     summary: "Faire avancer une demande (prise en charge, gagnée, perdue)", params: IdParams,
     body: z.object({ status: z.enum(["under_review", "won", "lost", "cancelled"]) }),
-    handler: async ({ params, body, principal, correlationId }) => {
-      const r = await one(db, `select * from canada.requests where id = $1`, [params.id]);
+    handler: async ({ params, body, principal, correlationId }) => withTransaction(async (tx) => {
+      const r = await one(tx, `select * from canada.requests where id = $1 for update`, [params.id]);
       if (!r) throw notFound("REQUEST_NOT_FOUND", "Demande introuvable.");
       assertCan(principal, "canada.requests.process", { countries: [r.origin_country, r.destination_country], agencyIds: [r.preferred_agency_id] });
-      const u = await one(db, `update canada.requests set status = $2, handled_by = $3, handled_at = now() where id = $1 returning *`, [r.id, body.status, principal.userId]);
-      await audit(db, { actorUserId: principal.userId, action: "canada.request.status_changed", resourceType: "request", resourceId: r.id, previous: { status: r.status }, next: { status: body.status }, correlationId });
+      const u = await one(tx, `update canada.requests set status = $2, handled_by = $3, handled_at = now() where id = $1 returning *`, [r.id, body.status, principal.userId]);
+      await audit(tx, { actorUserId: principal.userId, action: "canada.request.status_changed", resourceType: "request", resourceId: r.id, previous: { status: r.status }, next: { status: body.status }, correlationId });
       return { data: u };
-    },
+    }),
   }),
 ];
 

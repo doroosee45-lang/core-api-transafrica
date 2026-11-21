@@ -1,0 +1,30 @@
+# Trans Afrique Core API — delivery manifest
+# Base commit: 3ad04f74d7e833544adfcb20ee5263b539d908df
+# M = modified relative to base; A = added/untracked source or documentation file.
+# SHA-256 covers exact bytes. This manifest excludes itself and the patch artifact.
+# Reconstruct: checkout base, apply LOCAL-SECURITY-FOLLOWUP.patch, then verify every listed row.
+# Included tree files: 23
+status	sha256	path
+A	5d513d72172ce084643c3e4db78ee21c8333b59da538829586b82faf7092b1b7	.github/workflows/ci.yml
+A	b2afc67902c3f2fda89443fd46f58866d10ae3313e6b23257ecf6d4b322cfc90	.nvmrc
+M	5ae5ec1e4407ae8afb633d2287b47612efa5a7fee4ea46af8915895ce271e76b	README.md
+M	748bdd8457acce8cc0ee6cf0c239423c1a6f1ee3cd25a804e34a50d37d1192a1	docs/AUDIT.md
+A	dfe4f91145202a90b76d2374b989354962cca37f236dc9e4c50d224e7db26d0a	docs/B29-MATRIX-TO-ARBITRATE.md
+A	312ed3c453b2e90e4653f7deb6e42c5f911b55d581c5cd6a4e5061e81084a34a	docs/PREPROD-DB-ROLE-DIAGNOSTICS.sql
+A	51543766b6e2a564d945971d236975c456fb4b71e2ea9fb4b58febb8f97112da	docs/SECURITY-AUDIT-2026-11-20.md
+A	e7f77d1aa13df5a966b2f3ad3b75f3671579f0d4eb3b486080740c87c4bc4a4f	docs/SECURITY-FOLLOWUP-2026-11-20.md
+M	dd86908a2508d2789e2c61fdd2698d5dbda1d6238356697531609c816a37adf0	package-lock.json
+M	13beeb3490e5b61ec35bf8a6a080707a78d8917ab9992d0bdd6b4a7b96fc3ee2	package.json
+M	36b4d15f5d212e01435521ca7ab6b069a6f69fa8fd21121bddd54387fa021c58	src/core/routes.ts
+M	63516079013de7c8cc7a11d4055a46cc77d0a8606a5a2ee9dc4b9df8e3ae9b88	src/i18n/en.ts
+M	fe2afe49f269b83ea86dccf48659ba85c4d42177b5a60786299464476e2d5d8e	src/modules/access/access.routes.ts
+M	3e08b847a8bb6c12c1028c5368bb06616a5714ea9b62d12f58457eac5fa9054b	src/modules/canada/client.routes.ts
+M	0dbc3fefce0f17c7fcb7870f3e6c365a8836b6313df76e8c8b5f34d04e891267	src/modules/canada/documents.routes.ts
+M	804c3f79c985935f2c43a05e3d467b31e307f5d3225795572813265aac9afb22	src/modules/canada/parcels/parcel.service.ts
+A	d0e660851c1dea5056f009b19a4740eec92eea4cb076b6109d3665de5e10fe07	src/modules/canada/request.service.ts
+M	768138167e861964997cfa4451d8c9cd0c2cfc4da59822e2a9b2b77fa2e572eb	src/modules/canada/structure.routes.ts
+A	bed5a4e49def637dad0ed6202fdbe640e6fb59408fc9f539f6a4448b6d9518dd	tests/audit-atomicity.test.ts
+A	72bb76e1a13ccd6ae66efa54fc7cb24e3622d2cf4903a1b0b3da1b4a76e9aa81	tests/idempotency-atomicity.test.ts
+M	a4dedbef55f8b1e75e6630c721801d256414ad9e2bb79d97062dff7de3f670cf	tests/legacy-migration.test.ts
+A	95c4d786173f230af4cb91a0821c87a9846456c7e9cc559d331b9d0f4150fd34	tests/parcel-warehouse-scope.test.ts
+M	cae160fc97441daa9292c7ca0b4c9626b1557374c1ddaf3c1ac4849c3a874f6e	tests/support/harness.ts

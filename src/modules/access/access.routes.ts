@@ -2,7 +2,7 @@ import { Router } from "express";
 import { formatDateTime } from "../../i18n/index.js";
 import { z } from "zod";
 import { env } from "../../config/env.js";
-import { db, one } from "../../core/db.js";
+import { db, one, withTransaction } from "../../core/db.js";
 import { notFound } from "../../core/errors.js";
 import { PageQuery } from "../../core/http.js";
 import { mount, route } from "../../core/routes.js";
@@ -113,15 +113,17 @@ const routes = [
     method: "post", path: "/access/invitations/:id/revoke", tag: "Accès", auth: "canada", anyPermission: ["canada.users.manage_access"],
     summary: "Révoquer une invitation en attente",
     params: IdParams,
-    handler: async ({ params, principal, correlationId }) => {
-      const inv = await one(db, `select * from access.invitations where id = $1`, [params.id]);
+    handler: async ({ params, principal, correlationId }) => withTransaction(async (tx) => {
+      const inv = await one(tx, `select * from access.invitations where id = $1 for update`, [params.id]);
       if (!inv) throw notFound("INVITATION_NOT_FOUND", "Invitation introuvable.");
-      assertCan(principal, "canada.users.manage_access", await resourceForScope(db, inv));
-      const r = await db.query(`update access.invitations set status = 'revoked', revoked_at = now() where id = $1 and status = 'pending' returning id`, [params.id]);
-      await db.query(`insert into audit.access_changes(actor_user_id, target_user_id, platform_id, role_id, change_type, reason, correlation_id)
-                      values ($1, $1, 1, $2, 'invite_revoke', 'Invitation révoquée', $3)`, [principal.userId, inv.role_id, correlationId]);
+      assertCan(principal, "canada.users.manage_access", await resourceForScope(tx, inv));
+      const r = await tx.query(`update access.invitations set status = 'revoked', revoked_at = now() where id = $1 and status = 'pending' returning id`, [params.id]);
+      if (r.rowCount) {
+        await tx.query(`insert into audit.access_changes(actor_user_id, target_user_id, platform_id, role_id, change_type, reason, correlation_id)
+                        values ($1, $1, 1, $2, 'invite_revoke', 'Invitation révoquée', $3)`, [principal.userId, inv.role_id, correlationId]);
+      }
       return { data: { revoked: r.rowCount === 1 } };
-    },
+    }),
   }),
   route({
     method: "post", path: "/access/users/:id/platform-access", tag: "Accès", auth: "canada", anyPermission: ["canada.users.manage_access"],

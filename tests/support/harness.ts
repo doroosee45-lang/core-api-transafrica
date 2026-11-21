@@ -42,7 +42,8 @@ export async function setupHarness(opts: { enforceMfa?: boolean } = {}) {
   } as any);
   const { createApp } = await import("../../src/app.js");
   const { closePool } = await import("../../src/core/db.js");
-  const api = supertest(createApp());
+  const app = createApp();
+  const api = supertest(app);
 
   async function makeUser(email: string, o: { first?: string; last?: string; roles?: Role[]; confirmed?: boolean; client?: { residence?: string; agency?: string };
     mfa?: boolean; language?: "fr" | "en" } = {}) {
@@ -106,7 +107,7 @@ export async function setupHarness(opts: { enforceMfa?: boolean } = {}) {
     await a.end();
   }
 
-  return { api, pool, stub, makeUser, world, auth, idem, teardown };
+  return { api, app, pool, stub, makeUser, world, auth, idem, teardown };
 }
 
 export type Harness = Awaited<ReturnType<typeof setupHarness>>;

@@ -1,32 +1,38 @@
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { PASSWORD, setupHarness, type Harness } from "./support/harness.js";
 
 /**
- * TEST DE CONTRAT avec l'application mobile (`../Mobile/src/backend/core.ts`) :
- * l'adaptateur mobile RÉEL est exécuté contre le Core API RÉEL (PostgreSQL 18). Seul le transport
- * HTTPS du mobile (`apiClient`, qui refuse HTTP) est remplacé par un appel direct à l'application
- * Express ; chemins, corps, en-têtes d'idempotence et analyse des réponses sont ceux du mobile.
- * Un changement de contrat d'un côté ou de l'autre fait échouer ce test.
+ * TEST DE CONTRAT DE BOUT EN BOUT avec l'application mobile :
+ * le client HTTP RÉEL du mobile (`../Mobile/src/api.ts` : Bearer, Idempotency-Key, délai, enveloppe,
+ * erreurs typées) et son adaptateur RÉEL (`../Mobile/src/backend/core.ts`) envoient de vraies requêtes
+ * HTTP à un Core API RÉEL à l'écoute sur un port local, adossé à PostgreSQL 18.
+ * Seule différence avec l'appareil : le chiffrement TLS (le client mobile n'accepte que HTTPS ; le
+ * transport réécrit l'origine https://core.test vers le serveur local HTTP).
+ * Chaque requête réellement émise est journalisée (méthode, chemin, statut) pour preuve.
  */
 let h: Harness;
 let w: Awaited<ReturnType<Harness["world"]>>;
 let mobile: any;
+let mobileApi: any;
+let server: http.Server;
+let origin = "";
+const journal: string[] = [];
 let client: any, agentCN: any, mgrCN: any, adminCN: any, finCN: any;
 const T = async (u: any) => h.auth(await u.token());
 let n = 0;
 
-/** Équivalent de `apiClient` (même contrat : Bearer, Idempotency-Key, erreurs typées, `parse`). */
+/** Client HTTP réel du mobile, connecté au serveur Core API local par le réseau. */
 function requestAs(token: () => Promise<string>) {
-  return async (p: string, o: { method?: string; body?: unknown; idempotencyKey?: string; authenticated?: boolean; parse: (d: unknown) => unknown }) => {
-    const m = (o.method ?? "GET").toLowerCase() as "get" | "post" | "patch" | "put" | "delete";
-    let r = h.api[m](p);
-    if (o.authenticated !== false) r = r.set("Authorization", `Bearer ${await token()}`);
-    if (o.idempotencyKey) r = r.set("Idempotency-Key", o.idempotencyKey);
-    const res = o.body !== undefined ? await r.send(o.body as object) : await r;
-    if (res.status >= 400) throw Object.assign(new Error(`HTTP ${res.status} ${res.body?.error?.code ?? ""} ${res.body?.error?.message ?? ""} ${p}`), { status: res.status, code: res.body?.error?.code });
-    return o.parse(res.body);
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = String(input).replace("https://core.test", origin);
+    const res = await fetch(url, init);
+    journal.push(`${init?.method ?? "GET"} ${new URL(url).pathname} -> ${res.status}`);
+    return res;
   };
+  return mobileApi.apiClient("https://core.test", async () => (await token()) || null, fetcher);
 }
 const key = () => `mobile-contract-${++n}-${Date.now()}`;
 const signal = () => new AbortController().signal;
@@ -34,14 +40,24 @@ const signal = () => new AbortController().signal;
 beforeAll(async () => {
   h = await setupHarness();
   w = await h.world();
+  const { createApp } = await import("../src/app.js");
+  server = http.createServer(createApp());
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   mobile = await import(pathToFileURL(path.resolve("../Mobile/src/backend/core.ts")).href);
+  mobileApi = await import(pathToFileURL(path.resolve("../Mobile/src/api.ts")).href);
   client = await h.makeUser("mobile.client@ta.test", { roles: [{ role: "canada_client", scope_type: "own" }], client: { residence: "CD", agency: w.cd } });
   agentCN = await h.makeUser("mobile.agent@ta.test", { roles: [{ role: "canada_agent", scope_type: "agency", scope_id: w.cn }] });
   mgrCN = await h.makeUser("mobile.mgr@ta.test", { roles: [{ role: "canada_agency_manager", scope_type: "agency", scope_id: w.cn }] });
   adminCN = await h.makeUser("mobile.admin@ta.test", { mfa: true, roles: [{ role: "canada_administrator", scope_type: "country", scope_country: "CN" }] });
   finCN = await h.makeUser("mobile.fin@ta.test", { roles: [{ role: "canada_finance_agent", scope_type: "agency", scope_id: w.cn }] });
 });
-afterAll(async () => { await h?.teardown(); });
+afterAll(async () => {
+  const lines = [...new Set(journal)];
+  console.log(`Requêtes HTTP réellement émises par le client mobile (${journal.length}, ${lines.length} distinctes) :\n  ${lines.join("\n  ")}`);
+  await new Promise<void>((r) => (server ? server.close(() => r()) : r()));
+  await h?.teardown();
+});
 
 describe("Contrat mobile ↔ Core API (adaptateur mobile réel, base réelle)", () => {
   let parcelId: string, reference: string, quoteId: string;
@@ -150,5 +166,37 @@ describe("Contrat mobile ↔ Core API (adaptateur mobile réel, base réelle)", 
       .send({ client_id: client.clientId, recipient_name: "Famille", origin_country: "CN", destination_country: "CD", origin_agency_id: w.cn, received_now: false });
     await expect(mobile.corePorts(requestAs(() => client.token()), key).receiveParcel({ reference: q.body.data.reference, condition: "good", note: "" })).rejects.toMatchObject({ status: 403 });
     expect((await h.pool.query(`select status from canada.parcels where id = $1`, [q.body.data.id])).rows[0].status).toBe("expected");
+  });
+  it("scan terrain : le code lu (URL contenant la référence) est identifié par le Core API ; code inconnu = introuvable ; client refusé", async () => {
+    const p = await h.api.post("/api/v1/canada/parcels").set(await T(agentCN)).set(h.idem())
+      .send({ client_id: client.clientId, recipient_name: "Famille", origin_country: "CN", destination_country: "CD", origin_agency_id: w.cn });
+    await h.api.post(`/api/v1/canada/parcels/${p.body.data.id}/scans`).set(await T(agentCN)).set(h.idem()).send({ location_text: "Quai 3" });
+    const agentPorts = mobile.corePorts(requestAs(() => agentCN.token()), key);
+    const scanned = `https://suivi.example/t/${p.body.data.reference.toLowerCase()}`;
+    const found = await agentPorts.identifyParcel({ code: scanned });
+    expect(found).toMatchObject({ id: p.body.data.id, reference: p.body.data.reference, status: "received", statusLabel: "Réceptionné",
+      origin: "CN", destination: "CD", lastLocation: "Quai 3" });
+    await expect(agentPorts.identifyParcel({ code: "TA-ZZZZZZ99" })).rejects.toMatchObject({ status: 404 });
+    // Le propriétaire peut retrouver son colis ; un autre client est refusé par le Core API.
+    expect((await mobile.corePorts(requestAs(() => client.token()), key).identifyParcel({ code: p.body.data.reference })).id).toBe(p.body.data.id);
+    const stranger = await h.makeUser("mobile.stranger@ta.test", { roles: [{ role: "canada_client", scope_type: "own" }], client: { residence: "CM" } });
+    await expect(mobile.corePorts(requestAs(() => stranger.token()), key).identifyParcel({ code: p.body.data.reference })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("profil : GET /identity/me lu par le mobile (client : numéro client ; agent : rôle et permissions réelles)", async () => {
+    const me = await mobile.profileService(requestAs(() => client.token())).me(signal());
+    const dbClient = (await h.pool.query(`select client_number from canada.clients where user_id = $1`, [client.id])).rows[0];
+    expect(me).toMatchObject({ userId: client.id, clientNumber: dbClient.client_number, roles: [{ role: "canada_client" }] });
+    expect(me.platforms).toEqual([{ code: "CANADA", status: "active" }]);
+    const agent = await mobile.profileService(requestAs(() => agentCN.token())).me(signal());
+    expect(agent.roles).toEqual([{ role: "canada_agent", scope: "agency" }]);
+    expect(agent.permissions).toContain("canada.parcels.receive");
+    expect(me.permissions).not.toContain("canada.parcels.receive");
+  });
+
+  it("libellés de statut du mobile identiques à ceux publiés par le Core API (GET /i18n)", async () => {
+    const i18n = await requestAs(async () => "")("/api/v1/i18n", { authenticated: false, parse: mobile.envelope((d: any) => d) });
+    const official = Object.fromEntries(Object.entries(i18n.labels.parcel_status).map(([k, v]: [string, any]) => [k, v.fr]));
+    expect(mobile.PARCEL_STATUS_FR).toEqual(official);
   });
 });

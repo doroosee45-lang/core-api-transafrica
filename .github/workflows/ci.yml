@@ -1,0 +1,44 @@
+name: Core API checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Provision pinned MongoDB binary for migration tests
+        run: |
+          binary_path="$(node --input-type=module -e 'import { MongoBinary } from "mongodb-memory-server-core"; console.log(await MongoBinary.getPath({ version: "8.2.6" }));')"
+          test -n "$binary_path" && test -x "$binary_path"
+          echo "MONGOD_BINARY=$binary_path" >> "$GITHUB_ENV"
+
+      - name: Type-check source and tests
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Complete test suite (including MongoDB migration tests)
+        run: npm test
+
+      - name: Qualify isolated PostgreSQL migrations and compiled API
+        run: npm run qualify:local

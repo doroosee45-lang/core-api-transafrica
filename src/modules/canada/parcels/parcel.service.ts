@@ -111,6 +111,14 @@ export async function createParcel(actor: Principal, input: CreateParcelInput, c
   });
 }
 
+async function loadWarehouseTarget(tx: Db, warehouseId: string, permission: string, actor: Principal, countries: string[]) {
+  const w = await one(tx, `select id, country_code, agency_id from canada.warehouses where id = $1 and status = 'active' for share`, [warehouseId]);
+  if (!w || !countries.includes(w.country_code)) throw unprocessable("WAREHOUSE_INVALID", "Entrepôt inactif ou incohérent avec l'étape.");
+  assertCan(actor, permission, { countries: [w.country_code], agencyIds: [w.agency_id], warehouseIds: [w.id] },
+    "Vous n'êtes pas autorisé sur l'entrepôt cible.");
+  return w;
+}
+
 export async function transitionParcel(actor: Principal, parcelId: string, input: {
   to_status: string; comment?: string | null; location_text?: string | null; proof_reference?: string | null;
   occurred_at?: string | null; source?: "scan" | "manual"; warehouse_id?: string | null; expected_row_version?: number;
@@ -135,12 +143,35 @@ export async function transitionParcel(actor: Principal, parcelId: string, input
     if (rule.requiresMeasurement && !p.billable_weight_kg) {
       throw unprocessable("MEASUREMENT_REQUIRED", "Le colis doit être pesé avant d'être déclaré prêt.");
     }
-    let warehouseId = p.current_warehouse_id;
-    if (input.warehouse_id) {
-      const w = await one(tx, `select id, country_code, agency_id from canada.warehouses where id = $1 and status = 'active'`, [input.warehouse_id]);
-      const expectedCountry = rule.phase === "destination" ? p.destination_country : p.origin_country;
-      if (!w || (rule.phase !== "any" && w.country_code !== expectedCountry)) throw unprocessable("WAREHOUSE_INVALID", "Entrepôt invalide pour cette étape.");
-      warehouseId = w.id;
+    let warehouseId = input.warehouse_id ?? p.current_warehouse_id;
+    if (warehouseId) {
+      const allowedCountries = rule.phase === "origin" ? [p.origin_country]
+        : rule.phase === "destination" ? [p.destination_country]
+        : [p.origin_country, p.destination_country];
+      const target = await loadWarehouseTarget(tx, warehouseId, rule.permission, actor, allowedCountries);
+      if (rule.phase === "origin" && p.origin_agency_id && target.agency_id !== p.origin_agency_id) {
+        throw unprocessable("WAREHOUSE_TRANSFER_REQUIRED", "Un changement d'agence d'entrepôt nécessite une opération de transfert explicite.");
+      }
+      if (rule.phase === "destination" && p.destination_agency_id && target.agency_id !== p.destination_agency_id) {
+        throw unprocessable("WAREHOUSE_TRANSFER_REQUIRED", "L'étape de destination doit utiliser l'agence de destination déclarée.");
+      }
+      if (rule.phase === "any") {
+        const current = p.current_warehouse_id
+          ? await one(tx, `select agency_id from canada.warehouses where id = $1 for share`, [p.current_warehouse_id])
+          : null;
+        if (current && current.agency_id !== target.agency_id) {
+          throw unprocessable("WAREHOUSE_TRANSFER_REQUIRED", "Une transition d'exception ne peut pas déplacer le colis entre agences.");
+        }
+        if (!current && ![p.origin_agency_id, p.destination_agency_id].includes(target.agency_id)) {
+          throw unprocessable("WAREHOUSE_TRANSFER_REQUIRED", "Un premier entrepôt doit appartenir à une agence d'origine ou de destination.");
+        }
+      }
+      if (rule.phase === "origin" && p.current_warehouse_id) {
+        const current = await one(tx, `select agency_id from canada.warehouses where id = $1 for share`, [p.current_warehouse_id]);
+        if (current && current.agency_id !== target.agency_id) {
+          throw unprocessable("WAREHOUSE_TRANSFER_REQUIRED", "Une étape d'origine ne peut pas déplacer le colis entre agences.");
+        }
+      }
     }
     await tx.query(
       `update canada.parcels set status = $2::text, current_warehouse_id = $3, updated_by = $4, row_version = row_version + 1,
@@ -167,9 +198,19 @@ export async function measureParcel(actor: Principal, parcelId: string, input: {
   return withTransaction(async (tx) => {
     const p = await loadParcel(tx, parcelId, true);
     const atDestination = ["arrived_destination", "received_destination", "available", "in_customs"].includes(p.status);
-    const resource = atDestination ? destinationResource(p) : originResource(p);
+    const atAnyLocation = ["on_hold", "damaged"].includes(p.status);
+    const resource = atDestination ? destinationResource(p) : atAnyLocation ? parcelResource(p) : originResource(p);
     assertCan(actor, "canada.parcels.weigh", resource);
     if (dims.some(Boolean)) assertCan(actor, "canada.parcels.measure", resource);
+    const measurementWarehouseId = input.warehouse_id ?? p.current_warehouse_id;
+    if (measurementWarehouseId) {
+      const allowedCountries = atDestination ? [p.destination_country]
+        : atAnyLocation ? [p.origin_country, p.destination_country] : [p.origin_country];
+      const measurementSite = await loadWarehouseTarget(tx, measurementWarehouseId, "canada.parcels.weigh", actor, allowedCountries);
+      if (dims.some(Boolean)) assertCan(actor, "canada.parcels.measure", {
+        countries: [measurementSite.country_code], agencyIds: [measurementSite.agency_id], warehouseIds: [measurementSite.id],
+      }, "Vous n'êtes pas autorisé à mesurer dans cet entrepôt.");
+    }
     if (!["received", "inspected", "received_destination", "on_hold", "damaged"].includes(p.status)) {
       throw unprocessable("MEASUREMENT_NOT_ALLOWED", msg("Pesée impossible au statut « {p0} ».", { p0: p.status }));
     }
@@ -186,14 +227,14 @@ export async function measureParcel(actor: Principal, parcelId: string, input: {
          volumetric_weight_kg, billable_weight_kg, warehouse_id, measured_by, reason)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) returning *`,
       [p.id, w.actual, input.length_cm ?? null, input.width_cm ?? null, input.height_cm ?? null, rule.volumetric_divisor,
-       w.volumetric, w.billable, input.warehouse_id ?? p.current_warehouse_id, actor.userId, input.reason ?? null]);
+       w.volumetric, w.billable, measurementWarehouseId, actor.userId, input.reason ?? null]);
     await tx.query(
       `update canada.parcels set actual_weight_kg = $2, length_cm = $3, width_cm = $4, height_cm = $5, volumetric_divisor = $6,
               volumetric_weight_kg = $7, billable_weight_kg = $8, measured_at = now(), updated_by = $9, row_version = row_version + 1
         where id = $1`,
       [p.id, w.actual, input.length_cm ?? null, input.width_cm ?? null, input.height_cm ?? null, rule.volumetric_divisor, w.volumetric, w.billable, actor.userId]);
     await recordParcelEvent(tx, { parcel: p, type: "parcel.measured", from: p.status, to: p.status, actor: actor.userId,
-      warehouseId: input.warehouse_id ?? p.current_warehouse_id, visibility: "internal",
+      warehouseId: measurementWarehouseId, visibility: "internal",
       comment: isRemeasure ? `Nouvelle pesée : ${input.reason}` : null, correlationId });
 
     // Écart de poids après un devis émis : régularisation requise (Dossier 05 §12.4).

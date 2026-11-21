@@ -137,12 +137,16 @@ const routes = [
       const signatureOk = declaredOk && matchesSignature(doc.mime_type, await storage.head(doc.storage_path));
       const matches = declaredOk && signatureOk;
       const reason = !declaredOk ? "SIZE_OR_TYPE_MISMATCH" : !signatureOk ? "CONTENT_SIGNATURE_MISMATCH" : null;
-      const r = await one(db,
-        `update canada.documents set status = $2, stored_size = $3, confirmed_at = now(), rejection_reason = $4 where id = $1 and status = 'pending_upload'
-         returning id, status, stored_size, confirmed_at`,
-        [doc.id, matches ? "uploaded" : "rejected", info.size, reason]);
-      await audit(db, { actorUserId: principal.userId, action: matches ? "canada.document.uploaded" : "canada.document.rejected",
-        resourceType: "document", resourceId: doc.id, next: { stored_size: info.size, content_type: info.contentType, rejection_reason: reason }, correlationId });
+      const r = await withTransaction(async (tx) => {
+        const updated = await one(tx,
+          `update canada.documents set status = $2, stored_size = $3, confirmed_at = now(), rejection_reason = $4 where id = $1 and status = 'pending_upload'
+           returning id, status, stored_size, confirmed_at`,
+          [doc.id, matches ? "uploaded" : "rejected", info.size, reason]);
+        if (!updated) throw conflict("DOCUMENT_ALREADY_CONFIRMED", "Statut non modifiable.");
+        await audit(tx, { actorUserId: principal.userId, action: matches ? "canada.document.uploaded" : "canada.document.rejected",
+          resourceType: "document", resourceId: doc.id, next: { stored_size: info.size, content_type: info.contentType, rejection_reason: reason }, correlationId });
+        return updated;
+      });
       if (!matches) throw unprocessable("DOCUMENT_MISMATCH", t("Le fichier téléversé ne correspond pas à la déclaration."));
       return { data: r };
     },

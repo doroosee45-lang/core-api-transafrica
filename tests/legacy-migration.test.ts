@@ -2,10 +2,15 @@
  * Reprise MongoDB → PostgreSQL sur un vrai mongod, alimenté avec des documents
  * au format des modèles Mongoose du backend MERN (models/*.js).
  */
+import { execFileSync } from "node:child_process";
+import { constants } from "node:fs";
+import { access } from "node:fs/promises";
 import bcrypt from "bcryptjs";
 import { MongoClient, ObjectId } from "mongodb";
 import { MongoMemoryServer } from "mongodb-memory-server";
 import { PASSWORD, setupHarness, type Harness } from "./support/harness.js";
+
+const TEST_MONGODB_VERSION = "8.2.6";
 
 let h: Harness;
 let mongod: MongoMemoryServer;
@@ -15,9 +20,27 @@ const id = () => new ObjectId();
 const ids = { agKin: id(), agBzv: id(), agNone: id(), uSuper: id(), uAdminRdc: id(), uAgentNoAgency: id(), uAgent: id(), uClient: id(), uBadHash: id(),
   cSender: id(), cReceiver: id(), pkg: id(), pkgNoAgency: id(), pay: id(), flight: id() };
 
+async function startTestMongo(): Promise<MongoMemoryServer> {
+  const binaryPath = process.env.MONGOD_BINARY?.trim();
+  if (!binaryPath) {
+    throw new Error(`MONGOD_BINARY is required for legacy migration tests (expected MongoDB ${TEST_MONGODB_VERSION}); provision the pinned binary and set MONGOD_BINARY to its executable path.`);
+  }
+  try {
+    await access(binaryPath, constants.X_OK);
+    const versionOutput = execFileSync(binaryPath, ["--version"], { encoding: "utf8", timeout: 10_000 });
+    const actualVersion = versionOutput.match(/db version v([0-9]+\.[0-9]+\.[0-9]+)/)?.[1];
+    if (actualVersion !== TEST_MONGODB_VERSION) {
+      throw new Error(`MONGOD_BINARY reports MongoDB ${actualVersion ?? "an unrecognized version"}; expected ${TEST_MONGODB_VERSION}.`);
+    }
+    return await MongoMemoryServer.create({ binary: { systemBinary: binaryPath, version: TEST_MONGODB_VERSION } });
+  } catch (cause) {
+    throw new Error(`MONGOD_BINARY is missing, not executable, invalid, or not MongoDB ${TEST_MONGODB_VERSION}: ${binaryPath}`, { cause });
+  }
+}
+
 beforeAll(async () => {
+  mongod = await startTestMongo();
   h = await setupHarness();
-  mongod = await MongoMemoryServer.create({ binary: { systemBinary: process.env.MONGOD_BINARY ?? "C:\\Program Files\\MongoDB\\Server\\8.2\\bin\\mongod.exe" } });
   uri = mongod.getUri("colis");
   const c = new MongoClient(uri);
   await c.connect();

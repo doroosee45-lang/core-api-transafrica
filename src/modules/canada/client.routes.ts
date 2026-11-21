@@ -6,18 +6,17 @@
  */
 import { Router } from "express";
 import { z } from "zod";
-import { db, one } from "../../core/db.js";
-import { forbidden, notFound } from "../../core/errors.js";
-import { emit } from "../../core/outbox.js";
+import { db, one, withTransaction } from "../../core/db.js";
+import { notFound } from "../../core/errors.js";
 import { PageQuery } from "../../core/http.js";
 import { mount, route } from "../../core/routes.js";
-import { randomReference } from "../../core/references.js";
 import { CountryCode, Email, IdParams } from "../../core/schemas.js";
 import { assertCan } from "../access/authorization.js";
 import { loadParcel, paginate, parcelResource } from "./common.js";
 import { flightTracking } from "./flights/flight.routes.js";
 import { label, type Locale } from "../../i18n/index.js";
 import { lastConfirmedPosition } from "./logistics.extra.routes.js";
+import { createClientRequest, createPublicRequest } from "./request.service.js";
 import { loadQuote, quoteDetail, respondToQuote } from "./finance/quote.service.js";
 
 async function myClientIds(userId: string): Promise<string[]> {
@@ -134,22 +133,13 @@ const routes = [
       [principal.userId])).rows }),
   }),
   route({
-    method: "post", path: "/me/requests", tag: "Espace client", auth: "canada", anyPermission: ["canada.requests.create_own"], idempotent: true,
+    method: "post", path: "/me/requests", tag: "Espace client", auth: "canada", anyPermission: ["canada.requests.create_own"], idempotent: true, atomicIdempotency: true,
     summary: "Nouvelle demande d'expédition / de devis",
     body: z.object({ origin_country: CountryCode, destination_country: CountryCode, shipment_type: z.enum(["parcel", "kilogram", "pallet", "documents", "other"]).default("parcel"),
       estimated_weight_kg: z.number().nonnegative().max(100000).optional(), message: z.string().trim().max(2000).optional(), preferred_agency_id: z.uuid().optional() }),
-    handler: async ({ body, principal, correlationId }) => {
-      const c = await one(db, `select id, first_name, last_name, email, phone from canada.clients where user_id = $1`, [principal.userId]);
-      if (!c) throw forbidden("CLIENT_PROFILE_MISSING", "Aucune fiche client rattachée à ce compte.");
-      const r = await one(db,
-        `insert into canada.requests(reference, source, client_id, requester_user_id, full_name, email, phone, origin_country, destination_country,
-           preferred_agency_id, shipment_type, estimated_weight_kg, message, correlation_id)
-         values ($1,'client_app',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) returning id, reference, status, created_at`,
-        [randomReference("REQ", 8), c.id, principal.userId, `${c.first_name} ${c.last_name}`, c.email ?? principal.email, c.phone,
-         body.origin_country, body.destination_country, body.preferred_agency_id ?? null, body.shipment_type, body.estimated_weight_kg ?? null, body.message ?? null, correlationId]);
-      await emit(db, { type: "canada.request.created", aggregateType: "request", aggregateId: r.id, correlationId,
-        payload: { request_id: r.id, reference: r.reference, origin_country: body.origin_country, destination_country: body.destination_country } });
-      return { status: 201, data: r };
+    handler: async ({ body, principal, correlationId, transaction }) => {
+      if (!transaction) throw new Error("Atomic idempotency transaction missing for POST /me/requests.");
+      return { status: 201, data: await createClientRequest(transaction, principal, body, correlationId) };
     },
   }),
   route({
@@ -172,13 +162,13 @@ const routes = [
   route({
     method: "put", path: "/me/notification-preferences", tag: "Espace client", auth: "user", summary: "Préférences de notification par canal",
     body: z.object({ preferences: z.array(z.object({ channel: z.enum(["email", "push", "in_app"]), category: z.string().max(60).default("*"), enabled: z.boolean() })).max(50) }),
-    handler: async ({ body, principal }) => {
+    handler: async ({ body, principal }) => withTransaction(async (tx) => {
       for (const p of body.preferences) {
-        await db.query(`insert into shared.notification_preferences(user_id, channel, category, enabled) values ($1,$2,$3,$4)
+        await tx.query(`insert into shared.notification_preferences(user_id, channel, category, enabled) values ($1,$2,$3,$4)
                         on conflict (user_id, channel, category) do update set enabled = excluded.enabled, updated_at = now()`, [principal.userId, p.channel, p.category, p.enabled]);
       }
-      return { data: (await db.query(`select channel, category, enabled from shared.notification_preferences where user_id = $1`, [principal.userId])).rows };
-    },
+      return { data: (await tx.query(`select channel, category, enabled from shared.notification_preferences where user_id = $1`, [principal.userId])).rows };
+    }),
   }),
   route({
     method: "post", path: "/me/devices", tag: "Espace client", auth: "user", summary: "Enregistrer un appareil pour les notifications push",
@@ -223,18 +213,10 @@ const routes = [
       shipment_type: z.enum(["parcel", "kilogram", "pallet", "documents", "other"]).default("parcel"),
       estimated_weight_kg: z.number().nonnegative().max(100000).optional(), estimated_volume_m3: z.number().nonnegative().max(10000).optional(),
       message: z.string().trim().max(2000).optional() }),
-    handler: async ({ body, correlationId }) => {
-      const r = await one(db,
-        `insert into canada.requests(reference, source, full_name, company, email, phone, origin_country, destination_country, shipment_type,
-           estimated_weight_kg, estimated_volume_m3, message, correlation_id)
-         values ($1,'public_form',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) returning reference, status, created_at`,
-        [randomReference("REQ", 8), body.full_name, body.company ?? null, body.email, body.phone, body.origin_country, body.destination_country,
-         body.shipment_type, body.estimated_weight_kg ?? null, body.estimated_volume_m3 ?? null, body.message ?? null, correlationId]);
-      const id = (await one(db, `select id from canada.requests where reference = $1`, [r.reference])).id;
-      await emit(db, { type: "canada.request.created", aggregateType: "request", aggregateId: id, correlationId,
-        payload: { request_id: id, reference: r.reference, origin_country: body.origin_country, destination_country: body.destination_country } });
-      return { status: 201, data: r };
-    },
+    handler: async ({ body, correlationId }) => ({
+      status: 201,
+      data: await withTransaction((tx) => createPublicRequest(tx, body, correlationId)),
+    }),
   }),
 ];
 
